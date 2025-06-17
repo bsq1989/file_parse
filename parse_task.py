@@ -13,6 +13,7 @@ import requests
 from utils import submit_convert_task, get_convert_task_status,identify_office_file
 from core import * 
 from file_parse_client import FileParseStatusClient
+from core.object_spliter import text_spliter, table_spliter, image_spliter
 
 
 
@@ -165,7 +166,7 @@ def push_task():
                 "task_id": uuid.uuid4().hex,  # 使用 UUID 作为任务 ID
                 "task_name": "example_task",  # 示例任务名称
                 "ts": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # 当前时间戳
-                "file_key": "process_test.xls",  # 示例任务数据
+                "file_key": "onlyoffice部署8.2.2arm.doc",  # 示例任务数据
                 "file_bucket": "file-sync"  # 示例存储桶
             }
 
@@ -307,7 +308,7 @@ def process():
     try:
         new_task = pull_task()
         if new_task.get("status") == "success" and new_task.get("task"):
-            db_client = FileParseStatusClient()
+            db_client = FileParseStatusClient('./config.json')
             task_id = new_task.get("task").get("task_id")
             task_name = new_task.get("task").get("task_name")
             ts = new_task.get("task").get("ts")
@@ -315,7 +316,7 @@ def process():
             file_bucket = new_task.get("task").get("file_bucket")
             db_client.create_task(
                 task_id=task_id,
-                task_name=task_name,
+                file_name=file_key,
                 file_path= file_key,
                 file_type=os.path.splitext(file_key)[1].lower(),
             )
@@ -353,16 +354,38 @@ def process():
                     if parser:
                         parsed_content = parser.parse(target_file_path)
                         # 更新任务状态为已解析
-                        db_client.update_task_status(task_id, 'parsed', progress=70)
-                        for content in parsed_content.content_list:
+                        
+                        docs = []
+                        total_part_count = len(parsed_content.content_list)
+
+                        for idx, content in enumerate(parsed_content.content_list):
+                            tmp_docs = []
                             if isinstance(content, TextProperty):
-                                logger.info(f"文本内容: {content.text_content}, 长度: {content.content_token_length}")
+                                tmp_docs = text_spliter(content)
+
                             elif isinstance(content, TableProperty):
-                                logger.info(f"表格内容: {content.html_content}, 行数: {content.table_row_count}, 列数: {content.table_column_count}")
+                                tmp_docs = table_spliter(content)
+
                             elif isinstance(content, ImageProperty):
-                                logger.info(f"图片内容: {content.image_name}, OCR 内容数量: {len(content.ocr_content_list)}")
+                                tmp_docs = image_spliter(content)
+
                             else:
-                                logger.info(f"其他内容类型: {type(content)}")
+                                logger.info(f"其他内容类型: {type(content)} : {content}")
+                            for sub_idx,doc in enumerate(tmp_docs):
+                                doc.metadata['file_name'] = parsed_content.file_name
+                                doc.metadata['file_type'] =  parsed_content.file_type
+                                doc.metadata['total_part_count'] = total_part_count
+                                doc.metadata['part_index'] = idx
+                                doc.metadata['part_sub_index'] = sub_idx
+                                doc.metadata['part_sub_count'] = len(tmp_docs)
+                                doc.metadata['total_txt_len'] = parsed_content.total_text_length
+                                doc.metadata['total_token_count'] = parsed_content.total_token_length
+                                doc.metadata['token_length'] = content.content_token_length
+                                docs.append(doc)
+
+                        db_client.update_task_status(task_id, 'parsed', progress=70)
+                        # 计算embedding
+                        
                         return {
                             "status": "success",
                             "message": "文件解析成功",

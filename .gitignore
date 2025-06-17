@@ -25,3 +25,4 @@
 *.bz2
 *html_test*
 *pycache*
+*logs*
