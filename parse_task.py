@@ -14,6 +14,7 @@ from utils import submit_convert_task, get_convert_task_status,identify_office_f
 from core import * 
 from file_parse_client import FileParseStatusClient
 from core.object_spliter import text_spliter, table_spliter, image_spliter
+from core.utils import get_embedding
 
 
 
@@ -302,6 +303,38 @@ def doc_convert(file_path):
     finally:
         pass
 
+@app.task()
+def embedding_test():
+    try:
+        with open('./config.json', 'r') as f:
+            embedding_cfg = json.load(f)
+            embedding_model = embedding_cfg.get('embeddingModel', 'bge-m3')
+            embedding_base_url = embedding_cfg.get('embeddingBaseUrl', 'http://localhost:6001/v1')
+            embedding_api_key = embedding_cfg.get('embeddingToken', None)
+
+            inputs = [
+                "这是一个测试文本，用于验证嵌入模型是否正常工作。",
+                "嵌入模型可以将文本转换为向量表示，便于后续的相似度计算和检索。",
+                "如果嵌入模型工作正常，则应该能够返回有效的向量表示。",
+                "请确保配置文件中的 embeddingModel 和 embeddingBaseUrl 正确无误。",
+                "如果有任何问题，请检查日志文件以获取更多信息。"
+            ]
+            results = get_embedding(inputs, model=embedding_model, base_url=embedding_base_url, api_key=embedding_api_key)
+            if results:
+                for idx, result in enumerate(results):
+                    logger.info(f"文本: {inputs[idx]}\n嵌入向量: {result[:10]}... (总长度: {len(result)})")
+            
+            return {
+                "status": "success",
+                "message": "嵌入模型测试成功"
+            }
+        
+    except Exception as e:
+        logger.error(f"读取配置文件失败: {e}")
+        return {
+            "status": "error",
+            "message": f"读取配置文件失败: {str(e)}"
+        }
 
 @app.task()
 def process():
@@ -385,7 +418,7 @@ def process():
 
                         db_client.update_task_status(task_id, 'parsed', progress=70)
                         # 计算embedding
-                        
+
                         return {
                             "status": "success",
                             "message": "文件解析成功",

@@ -16,5 +16,9 @@
     "postgresUser": "llm_admin",
     "postgresPassword": "llm_admin",
     "postgresDB": "llm_file_parser",
-    "officeConverterUrl": "http://converter_dev:8000"
+    "officeConverterUrl": "http://converter_dev:8000",
+    "embeddingModel": "text-embedding-v3",
+    "embeddingBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "embeddingToken": "sk-285b429c7c1f4baaa9f87fe0f3ba8bf7",
+    "embeddingBatchSize": 32
 }
