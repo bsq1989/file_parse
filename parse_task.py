@@ -9,6 +9,12 @@ import os
 import logging
 import logging.handlers
 from pathlib import Path
+import requests
+from utils import submit_convert_task, get_convert_task_status,identify_office_file
+from core import * 
+from file_parse_client import FileParseStatusClient
+
+
 
 def setup_logger(log_dir_path=None, app_log_name='parse_task.log', error_log_name='error.log'):
     """设置logger，支持控制台和轮转文件输出
@@ -159,7 +165,7 @@ def push_task():
                 "task_id": uuid.uuid4().hex,  # 使用 UUID 作为任务 ID
                 "task_name": "example_task",  # 示例任务名称
                 "ts": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # 当前时间戳
-                "file_key": "Mac 电脑环境配置.docx",  # 示例任务数据
+                "file_key": "process_test.xls",  # 示例任务数据
                 "file_bucket": "file-sync"  # 示例存储桶
             }
 
@@ -223,22 +229,172 @@ def download_file(file_key, file_bucket):
                 "status": "error",
                 "message": str(e),
             }
+@app.task()
+def doc_convert(file_path):
+    try:
+        with open('./config.json', 'r') as f:
+            convert_cfg = json.load(f)
+            converter_host = convert_cfg.get('officeConverterUrl', 'http://localhost:8000')
+          
+
+        if converter_host is None:
+            return {
+                "status": "error",
+                "message": "转换服务 URL 未配置"
+            }
+        if not os.path.exists(file_path):
+            return {
+                "status": "error",
+                "message": f"文件 {file_path} 不存在"
+            }
+        # 提交转换任务
+        response = submit_convert_task(file_path, f"{converter_host}/convert")
+        if response is None:
+            return {
+                "status": "error",
+                "message": "文件转换请求失败"
+            }
+        task_id = response.get('task_id')
+        if not task_id:
+            return {
+                "status": "error",
+                "message": "转换任务 ID 未返回"
+            }
+        logger.info(f"文件转换任务已提交，任务 ID: {task_id}")
+        # 查询转换任务状态
+        status_url = f"{converter_host}/status/{task_id}"
+        status_response = get_convert_task_status(status_url)
+        # logger.info(f"查询转换任务状态: {status_response}")
+        max_query_attempts = 10
+        query_attempts = 0
+        while status_response and query_attempts < max_query_attempts:
+            status =  status_response.get('status')
+            if status == 'completed':
+                download_url = status_response.get('minio_object')
+                if not download_url:
+                    raise ValueError(f"转换结果中没有下载URL: {file_path}")
+                # 下载转换后的文件
+                new_file_name = f"{download_url.split('/')[-1]}"
+                bucket_name = status_response.get('bucket')
+                return {
+                    "status": "success",
+                    "message": f"文件转换成功",
+                    "object_name": download_url,
+                    "file_name": new_file_name,
+                    "bucket_name": bucket_name
+                }
+            elif status == 'failed':
+                return {
+                    "status": "error",
+                    "message": f"文件转换失败: {status_response.get('message', '未知错误')}"
+                }
+            else:
+                logger.info(f"转换任务 {task_id} 仍在处理中，等待 5 秒后重试...")
+                time.sleep(5)
+                query_attempts += 1
+                status_response = get_convert_task_status(status_url)
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"文件转换失败: {e}"
+        }
+    finally:
+        pass
+
 
 @app.task()
 def process():
-    new_task = pull_task()
-    if new_task.get("status") == "success" and new_task.get("task"):
-        file_key = new_task.get("task").get("file_key")
-        file_bucket = new_task.get("task").get("file_bucket")
-        result = download_file(file_key, file_bucket)
-        if result.get("status") == "success":
-            file_path = result.get("file_path")
-            if os.path.exists(file_path):
-                logger.info(f"文件 {file_path} 下载成功，开始处理...")
-                time.sleep(2)
-                logger.info(f"文件 {file_path} 处理完成")
+    try:
+        new_task = pull_task()
+        if new_task.get("status") == "success" and new_task.get("task"):
+            db_client = FileParseStatusClient()
+            task_id = new_task.get("task").get("task_id")
+            task_name = new_task.get("task").get("task_name")
+            ts = new_task.get("task").get("ts")
+            file_key = new_task.get("task").get("file_key")
+            file_bucket = new_task.get("task").get("file_bucket")
+            db_client.create_task(
+                task_id=task_id,
+                task_name=task_name,
+                file_path= file_key,
+                file_type=os.path.splitext(file_key)[1].lower(),
+            )
+            db_client.update_task_status(task_id, 'downloading',progress=10)
+            result = download_file(file_key, file_bucket)
+            if result.get("status") == "success":
+                db_client.update_task_status(task_id, 'downloaded',progress=20)
+                file_path = result.get("file_path")
+                if os.path.exists(file_path):
+                    target_file_path = file_path
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    if file_ext in ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']:
+                    # 处理 Office 文件
+                        office_type = identify_office_file(file_path)
+                        if office_type in ['doc','ppt','xls']:
+                            logger.info(f"识别到文件类型: {office_type}")
+                            # 提交转换任务
+                            db_client.update_task_status(task_id, 'converting')
+                            convert_result = doc_convert(file_path)
+                            if convert_result.get("status") == "success":
+                                # 成功转换文件
+                                object_name = convert_result.get("object_name")
+                                file_name = convert_result.get("file_name")
+                                bucket_name = convert_result.get("bucket_name")
+                                result = download_file(object_name, bucket_name)
+                                target_file_path = result.get("file_path")
+                            else:
+                                return {
+                                    "status": "error",
+                                    "message": f"文件转换失败: {convert_result.get('message')}"
+                                }
+                    # 开始文件解析
+                    db_client.update_task_status(task_id, 'parsing', progress=50)
+                    parser = create_parser(target_file_path)
+                    if parser:
+                        parsed_content = parser.parse(target_file_path)
+                        # 更新任务状态为已解析
+                        db_client.update_task_status(task_id, 'parsed', progress=70)
+                        for content in parsed_content.content_list:
+                            if isinstance(content, TextProperty):
+                                logger.info(f"文本内容: {content.text_content}, 长度: {content.content_token_length}")
+                            elif isinstance(content, TableProperty):
+                                logger.info(f"表格内容: {content.html_content}, 行数: {content.table_row_count}, 列数: {content.table_column_count}")
+                            elif isinstance(content, ImageProperty):
+                                logger.info(f"图片内容: {content.image_name}, OCR 内容数量: {len(content.ocr_content_list)}")
+                            else:
+                                logger.info(f"其他内容类型: {type(content)}")
+                        return {
+                            "status": "success",
+                            "message": "文件解析成功",
+                            "file_path": target_file_path,
+                            "file_name": os.path.basename(target_file_path),
+                            "file_type": file_ext
+                        }
+                    else:
+                        db_client.update_task_status(task_id, 'failed', progress=0, error_message='无法创建解析器')
+                        return {
+                            "status": "error",
+                            "message": f"无法创建解析器，文件类型可能不受支持: {file_ext}"
+                        }
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"文件 {file_path} 不存在，处理失败",
+                    }
             else:
+                db_client.update_task_status(task_id, 'failed', progress=0, error_message='文件下载失败')
                 return {
                     "status": "error",
-                    "message": f"文件 {file_path} 不存在，处理失败",
+                    "message": f"文件下载失败: {result.get('message')}",
                 }
+        else:
+            return {
+                "status": "error",
+                "message": f"拉取任务失败: {new_task.get('message')}",
+            }
+    except Exception as e:
+        logger.error(f"处理任务时发生错误: {e}")
+        return {
+            "status": "error",
+            "message": f"处理任务失败: {str(e)}"
+        }

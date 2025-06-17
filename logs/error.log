@@ -1,0 +1,2 @@
+2025-06-17 02:38:10 - file_parse - ERROR - 处理任务时发生错误: 'FileBaseProperty' object is not iterable
+2025-06-17 02:40:44 - file_parse - ERROR - 处理任务时发生错误: name 'content_list' is not defined
