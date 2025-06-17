@@ -1,0 +1,19 @@
+{
+    "redisIP": "parser_redis",
+    "redisPort": 6379,
+    "redisDB": 0,
+    "taskQueueRedisIP": "parser_redis",
+    "taskQueueRedisPort": 6379,
+    "taskQueueRedisDB": 0,
+    "taskQueueName": "file_parse_tasks",
+    "minioIP":"minio",
+    "minioPort": 9000,
+    "minioAccessKey": "1e8M8JgXONzjLT5l6BoA",
+    "minioSecretKey": "rGXkIOQjWMUgq0SNv5ddBc6XZFS2fcNE3cfpq9nM",
+    "logPath": "/home/ubuntu/app/file_parse/logs",
+    "postgresIP": "llm-postgres",
+    "postgresPort": 5432,
+    "postgresUser": "llm_admin",
+    "postgresPassword": "llm_admin",
+    "postgresDB": "llm_file_parser"
+}
