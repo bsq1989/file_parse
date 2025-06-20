@@ -1,5 +1,7 @@
 import tiktoken
 from openai import OpenAI
+import os
+os.environ["TIKTOKEN_CACHE_DIR"] = '/home/ubuntu/app/models'
 
 def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> int:
     """Returns the number of tokens in a text string."""
