@@ -27,3 +27,7 @@
 *pycache*
 *logs*
 core/*pycache*
+ocr_test*
+core/__pycache__/*
+*.pyc
+*.log

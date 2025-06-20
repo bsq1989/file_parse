@@ -29,16 +29,21 @@ def get_embedding(text, model="bge-m3",base_url="http://localhost:6001/v1",api_k
    
     # Initialize the client with custom base URL
     client = OpenAI(base_url=base_url, api_key=api_key)
+    try:
     
-    # Get the embedding from OpenAI
-    response = client.embeddings.create(
-        input=text,
-        model=model
-    )
-    
-    # Extract the embedding from the response
-    embedding_results = [
-        item.embedding for item in response.data
-    ]
-    
-    return embedding_results
+        # Get the embedding from OpenAI
+        response = client.embeddings.create(
+            input=text,
+            model=model
+        )
+        
+        # 判断response 有效性
+        if not response or not hasattr(response, 'data') or not response.data:
+            return False, [], 'no embedding data found'
+        # Extract the embedding from the response
+        embedding_results = [
+            item.embedding for item in response.data
+        ]
+        return True, embedding_results, 'get embedding success'
+    except Exception as e:
+        return False ,[], f'get embedding failed: {str(e)}'

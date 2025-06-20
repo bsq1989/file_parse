@@ -117,7 +117,7 @@ class PdfParser(FileParser):
                         image_property.image_width, image_property.image_height = img.size
                         img.load()
                         with open(image_property.image_path, 'rb') as f:
-                            image_property.image_data = f.read()
+                            image_property.blob_data = f.read()
                     image_property.image_format = 'RGB'
                     self.property.content_list.append(image_property)
                     image_index += 1

@@ -3,7 +3,17 @@ import os
 from magic_pdf.data.data_reader_writer import FileBasedDataWriter
 from magic_pdf.model.doc_analyze_by_custom_model import doc_analyze
 from magic_pdf.data.read_api import read_local_images
+import numpy as np
 
+# 旧代码：
+# from numpy import Inf
+# value = Inf
+
+# 新代码：
+value = np.inf
+
+# 或者创建一个别名：
+Inf = np.inf
 # prepare env
 local_image_dir, local_md_dir = "ocr_test/images", "ocr_test"
 os.makedirs(local_image_dir, exist_ok=True)

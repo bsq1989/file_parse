@@ -15,7 +15,8 @@ from core import *
 from file_parse_client import FileParseStatusClient
 from core.object_spliter import text_spliter, table_spliter, image_spliter
 from core.utils import get_embedding
-
+from milvus_client import MilvusVectorDB
+import hashlib
 
 
 def setup_logger(log_dir_path=None, app_log_name='parse_task.log', error_log_name='error.log'):
@@ -167,7 +168,7 @@ def push_task():
                 "task_id": uuid.uuid4().hex,  # 使用 UUID 作为任务 ID
                 "task_name": "example_task",  # 示例任务名称
                 "ts": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # 当前时间戳
-                "file_key": "onlyoffice部署8.2.2arm.doc",  # 示例任务数据
+                "file_key": "test.docx",  # 示例任务数据
                 "file_bucket": "file-sync"  # 示例存储桶
             }
 
@@ -200,6 +201,7 @@ def download_file(file_key, file_bucket):
         minio_access_key = minio_cfg.get('minioAccessKey', 'minioadmin')
         minio_secret_key = minio_cfg.get('minioSecretKey', 'minioadmin')
 
+        
         # 创建 MinIO 客户端
         client = minio.Minio(
             f'{minio_host}:{minio_port}',
@@ -319,7 +321,7 @@ def embedding_test():
                 "请确保配置文件中的 embeddingModel 和 embeddingBaseUrl 正确无误。",
                 "如果有任何问题，请检查日志文件以获取更多信息。"
             ]
-            results = get_embedding(inputs, model=embedding_model, base_url=embedding_base_url, api_key=embedding_api_key)
+            _, results, msg = get_embedding(inputs, model=embedding_model, base_url=embedding_base_url, api_key=embedding_api_key)
             if results:
                 for idx, result in enumerate(results):
                     logger.info(f"文本: {inputs[idx]}\n嵌入向量: {result[:10]}... (总长度: {len(result)})")
@@ -339,6 +341,9 @@ def embedding_test():
 @app.task()
 def process():
     try:
+        with open('./config.json', 'r') as f:
+            parse_cfg = json.load(f)
+        
         new_task = pull_task()
         if new_task.get("status") == "success" and new_task.get("task"):
             db_client = FileParseStatusClient('./config.json')
@@ -416,9 +421,63 @@ def process():
                                 doc.metadata['token_length'] = content.content_token_length
                                 docs.append(doc)
 
-                        db_client.update_task_status(task_id, 'parsed', progress=70)
-                        # 计算embedding
+                        db_client.update_task_status(task_id, 'embedding', progress=80)
 
+                        # 计算embedding
+                        if parse_cfg:
+                            embedding_model = parse_cfg.get('embeddingModel', 'bge-m3')
+                            embedding_base_url = parse_cfg.get('embeddingBaseUrl', 'http://localhost:6001/v1')
+                            embedding_api_key = parse_cfg.get('embeddingToken', None)
+                            batch_size = parse_cfg.get('embeddingBatchSize', 32)
+                            # make batch data, group docs by  batch_size
+                            group_docs = [docs[i:i + batch_size] for i in range(0, len(docs), batch_size)]
+                            embedding_result = []
+                            for batch_doc in group_docs:
+                                embedding_input = [doc.page_content for doc in batch_doc]
+                                flag, result, msg = get_embedding(text=embedding_input, model=embedding_model, base_url=embedding_base_url, api_key=embedding_api_key)
+                                if flag:
+                                    embedding_result.extend(result)
+                                else:
+                                    logger.error(f"获取嵌入失败: {msg}")
+                                    db_client.update_task_status(task_id, 'failed', progress=0, error_message='向量化失败')
+                                    return {
+                                        "status": "error",
+                                        "message": f"获取嵌入失败: {msg}"
+                                    }
+                            for idx, doc in enumerate(docs):
+                                doc.metadata['embeddings'] = embedding_result[idx]
+                            # insert into milvus
+                            milvus_uri = parse_cfg.get('milvusUri', 'localhost:19530')
+                            milvus_client = MilvusVectorDB(milvus_uri)
+                            milvus_cache = []
+                            doc_id_prefix = f"{file_bucket}_{file_key}"
+                            # 计算md5
+                            doc_id_prefix = hashlib.md5(doc_id_prefix.encode()).hexdigest()
+                            for idx, doc in enumerate(docs):
+                                doc_id = f"{doc_id_prefix}_{idx}"
+                                doc_meta = doc.metadata.copy()
+                                # 删除不需要的属性
+                                doc_meta.pop('embeddings', None)
+
+                                milvus_cache.append(
+                                    {
+                                        "doc_id": doc_id,
+                                        "text": doc.page_content,
+                                        "text_dense":doc.metadata['embeddings'],
+                                        "doc_meta": doc_meta,
+                                        "image_dense": [0.2] * 512,
+                                    }
+                                )
+                            milvus_client.insert_data(data = milvus_cache)
+                            db_client.update_task_status(task_id, 'done', progress=100)
+
+                        else:
+                            db_client.update_task_status(task_id, 'failed', progress=0, error_message='配置文件无效')
+                            return {
+                                "status": "error",
+                                "message": "解析配置无效"
+                            }
+                        db_client.update_task_status(task_id, 'done', progress=100)
                         return {
                             "status": "success",
                             "message": "文件解析成功",
@@ -433,12 +492,12 @@ def process():
                             "message": f"无法创建解析器，文件类型可能不受支持: {file_ext}"
                         }
                 else:
+                    db_client.update_task_status(task_id, 'failed', progress=0, error_message='文件不存在')
                     return {
                         "status": "error",
                         "message": f"文件 {file_path} 不存在，处理失败",
                     }
             else:
-                db_client.update_task_status(task_id, 'failed', progress=0, error_message='文件下载失败')
                 return {
                     "status": "error",
                     "message": f"文件下载失败: {result.get('message')}",
@@ -449,8 +508,85 @@ def process():
                 "message": f"拉取任务失败: {new_task.get('message')}",
             }
     except Exception as e:
+        if task_id:
+            db_client.update_task_status(task_id, 'failed', progress=0, error_message=str(e))
         logger.error(f"处理任务时发生错误: {e}")
         return {
             "status": "error",
             "message": f"处理任务失败: {str(e)}"
+        }
+
+@app.task
+def test_sparse_search():
+    try:
+        with open('./config.json', 'r') as f:
+            parse_cfg = json.load(f)
+        milvus_uri = parse_cfg.get('milvusUri', 'localhost:19530')
+        milvus_client = MilvusVectorDB(milvus_uri)
+        query_text = "MOJITO"
+        results = milvus_client.search_by_text_sparse([query_text])
+        logger.info(f"查询结果: {results}")
+        return {
+            "status": "success",
+            "message": "稀疏搜索测试成功",
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"稀疏搜索测试失败: {e}")
+        return {
+            "status": "error",
+            "message": f"稀疏搜索测试失败: {str(e)}"
+        }
+    
+@app.task
+def test_dense_search():
+    try:
+        with open('./config.json', 'r') as f:
+            parse_cfg = json.load(f)
+        milvus_uri = parse_cfg.get('milvusUri', 'localhost:19530')
+        embedding_model = parse_cfg.get('embeddingModel', 'bge-m3')
+        embedding_base_url = parse_cfg.get('embeddingBaseUrl', 'http://localhost:6001/v1')
+        embedding_api_key = parse_cfg.get('embeddingToken', None)
+        milvus_client = MilvusVectorDB(milvus_uri)
+        query_text = "MOJITO"
+        _,embedding,_ = get_embedding([query_text], model=embedding_model, base_url=embedding_base_url, api_key=embedding_api_key)
+
+        results = milvus_client.search_by_text_dense(embedding)
+        logger.info(f"查询结果: {results}")
+        return {
+            "status": "success",
+            "message": "稠密搜索测试成功",
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"稠密搜索测试失败: {e}")
+        return {
+            "status": "error",
+            "message": f"稠密搜索测试失败: {str(e)}"
+        }
+    
+@app.task
+def test_milvus_del():
+    file_bucket = 'file-sync'
+    file_key = 'test.docx'
+    doc_id_prefix = f"{file_bucket}_{file_key}"
+    # 计算md5
+    doc_id_prefix = hashlib.md5(doc_id_prefix.encode()).hexdigest()
+    try:
+        with open('./config.json', 'r') as f:
+            parse_cfg = json.load(f)
+        milvus_uri = parse_cfg.get('milvusUri', 'localhost:19530')
+        milvus_client = MilvusVectorDB(milvus_uri)
+        # 删除所有以 doc_id_prefix 开头的文档
+        milvus_client.delete_by_doc_id_prefix(doc_id_prefix)
+        logger.info(f"成功删除以 {doc_id_prefix} 开头的所有文档")
+        return {
+            "status": "success",
+            "message": f"成功删除以 {doc_id_prefix} 开头的所有文档"
+        }
+    except Exception as e:
+        logger.error(f"删除文档失败: {e}")
+        return {
+            "status": "error",
+            "message": f"删除文档失败: {str(e)}"
         }
